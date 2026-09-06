@@ -36,6 +36,7 @@ class DroneClient(
         fun onStatus(text: String)
         fun onFirstFrame()
         fun onResolution(width: Int, height: Int)
+        fun onTelemetry(t: VisonTelemetry.Telemetry)
     }
 
     companion object {
@@ -46,28 +47,35 @@ class DroneClient(
         val HB_COMMAND = byteArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 37, 37)
         val UDP_DISCOVER = byteArrayOf(0x0F)
         val UDP_IFRAME = byteArrayOf(0x27)
-        // Camera gimbal (VISON camera module, UDP 8080, no checksum). angle 0..90 deg, 0=forward, 90=down.
-        val GIMBAL_QUERY = byteArrayOf(0xFF.toByte(), 0x53, 0x54, 0x15, 0x01)
-        const val GIMBAL_MIN = 0
-        const val GIMBAL_MAX = 90
+
+        // Camera gimbal, VISON "camera-adjust" path (opcode FF FD 09 — NOT the motor frame FF FD 0C).
+        // A streamed rate command: resend ~every 20ms while tilting, then stop on release.
+        val GIMBAL_UP = byteArrayOf(0xFF.toByte(), 0xFD.toByte(), 0x09, 0x02, 0x01, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x03)
+        val GIMBAL_DOWN = byteArrayOf(0xFF.toByte(), 0xFD.toByte(), 0x09, 0x02, 0x01, 0x01, 0x09, 0x00, 0x00, 0x00, 0x00, 0x02)
+        val GIMBAL_STOP = byteArrayOf(0xFF.toByte(), 0xFD.toByte(), 0x09, 0x02, 0x01, 0x03, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00)
     }
 
-    @Volatile private var gimbalAngle = 0
+    @Volatile private var gimbalActive = false
+    @Volatile private var gimbalFrame: ByteArray = GIMBAL_STOP
 
-    /** Move the camera to an absolute tilt angle (0 = forward, 90 = straight down). */
-    fun setGimbalAngle(angle: Int) {
-        val a = angle.coerceIn(GIMBAL_MIN, GIMBAL_MAX)
-        gimbalAngle = a
-        sendUdpCommand(byteArrayOf(0xFF.toByte(), 0x53, 0x54, 0x20, 0x01, a.toByte()))
+    /** Begin tilting; up=true tilts toward the horizon, up=false toward the ground. Hold to keep moving. */
+    fun gimbalPress(up: Boolean) {
+        gimbalFrame = if (up) GIMBAL_UP else GIMBAL_DOWN
+        gimbalActive = true
     }
 
-    /** Nudge the camera tilt by a relative amount and return the new angle. */
-    fun nudgeGimbal(delta: Int): Int {
-        setGimbalAngle(gimbalAngle + delta)
-        return gimbalAngle
+    /** Stop tilting and hold the current angle. */
+    fun gimbalRelease() {
+        gimbalActive = false
+        repeat(3) { sendUdpCommand(GIMBAL_STOP) }
     }
 
-    fun gimbalAngle(): Int = gimbalAngle
+    private fun gimbalLoop() {
+        while (running.get()) {
+            if (gimbalActive) sendUdpCommand(gimbalFrame)
+            Thread.sleep(20)
+        }
+    }
 
     private val running = AtomicBoolean(false)
     private val firstFrameSignalled = AtomicBoolean(false)
@@ -96,6 +104,8 @@ class DroneClient(
     private val decoder: VideoDecoder = VideoDecoder(surface) { w, h ->
         listener.onResolution(w, h)
     }
+
+    private val telemetry = VisonTelemetry { t -> listener.onTelemetry(t) }
 
     fun start() {
         if (running.getAndSet(true)) return
@@ -146,12 +156,67 @@ class DroneClient(
         startThread("udp") { udpLoop() }
         startThread("watchdog") { watchdogLoop() }
         startThread("stats") { statsLoop() }
+        startThread("gimbal") { gimbalLoop() }
+    }
+
+    // ---- SD-card capture (TCP 8888 command channel) -----------------------
+
+    /** Take a full-resolution photo onto the drone's SD card. */
+    fun takePhoto() {
+        sendTcpCommand(byteArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x11, 0x11, 0x00, 0x00))
+    }
+
+    /** Start recording video onto the drone's SD card. */
+    fun startRecord() {
+        // The 8 date bytes are ASCII chars from a base-32 table; the drone uses them as the filename.
+        val base32 = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+        val ascii = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        val c = java.util.Calendar.getInstance()
+        val yy = c.get(java.util.Calendar.YEAR) % 100
+        val mo = c.get(java.util.Calendar.MONTH) + 1
+        val dd = c.get(java.util.Calendar.DAY_OF_MONTH)
+        val hh = c.get(java.util.Calendar.HOUR_OF_DAY)
+        val mm = c.get(java.util.Calendar.MINUTE)
+        val ss = c.get(java.util.Calendar.SECOND)
+        val date = byteArrayOf(
+            base32[yy / 10].code.toByte(), base32[yy % 10].code.toByte(),
+            base32[mo].code.toByte(), base32[dd].code.toByte(),
+            base32[hh].code.toByte(), base32[mm / 10].code.toByte(), base32[mm % 10].code.toByte(),
+            ascii[ss / 2].code.toByte()
+        )
+        val cmd = byteArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x12, 0x12) + date + byteArrayOf(0x41, 0x56, 0x49)
+        sendTcpCommand(cmd)
+    }
+
+    /** Stop recording. Payload is a FAT date/time stamp, big-endian 16-bit each. */
+    fun stopRecord() {
+        val c = java.util.Calendar.getInstance()
+        val year = c.get(java.util.Calendar.YEAR)
+        val mon = c.get(java.util.Calendar.MONTH) + 1
+        val day = c.get(java.util.Calendar.DAY_OF_MONTH)
+        val h = c.get(java.util.Calendar.HOUR_OF_DAY)
+        val m = c.get(java.util.Calendar.MINUTE)
+        val s = c.get(java.util.Calendar.SECOND)
+        val fatDate = ((year - 1980) shl 9) or (mon shl 5) or day
+        val fatTime = (h shl 11) or (m shl 5) or (s / 2)
+        val cmd = byteArrayOf(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x13, 0x13,
+            ((fatDate shr 8) and 0xff).toByte(), (fatDate and 0xff).toByte(),
+            ((fatTime shr 8) and 0xff).toByte(), (fatTime and 0xff).toByte()
+        )
+        sendTcpCommand(cmd)
     }
 
     private fun statsLoop() {
         var lastBytes = 0L; var lastFed = 0L; var lastRendered = 0L; var lastKey = 0L; var lastSkip = 0L
         while (running.get()) {
             sleep(1000)
+            try {
+                val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                telemetry.setRssi(wifi.connectionInfo.rssi)
+            } catch (_: Exception) {
+            }
             val b = statBytes; val f = statFed; val r = decoder.framesRendered(); val k = statKey; val s = statSkipped
             Log.d(TAG, "1s read=${b - lastBytes}B fed=${f - lastFed} rendered=${r - lastRendered} iframe=${k - lastKey} skipped=${s - lastSkip}")
             lastBytes = b; lastFed = f; lastRendered = r; lastKey = k; lastSkip = s
@@ -272,7 +337,7 @@ class DroneClient(
                 }
                 val n = try { inp.read(buffer) } catch (te: SocketTimeoutException) { 0 }
                 if (n == -1) break
-                // Telemetry (VISON FF FE…) arrives here; not needed for the monitor yet.
+                if (n > 0) telemetry.feed(buffer, n) // VISON FF FE… telemetry
             }
             cmdOut = null
         }
@@ -287,7 +352,6 @@ class DroneClient(
             var last = 0L
             val rx = ByteArray(512)
             send(s, dst, UDP_DISCOVER)
-            send(s, dst, GIMBAL_QUERY)
             while (running.get()) {
                 val now = System.currentTimeMillis()
                 if (now - last > 1000) {
@@ -300,7 +364,6 @@ class DroneClient(
                 try {
                     val p = DatagramPacket(rx, rx.size)
                     s.receive(p)
-                    parseUdpReply(rx, p.length)
                 } catch (_: SocketTimeoutException) {
                 }
             }
@@ -315,18 +378,6 @@ class DroneClient(
             if (lastVideoByteMs != 0L && idle in 4000..11999) {
                 requestIFrame()
             }
-        }
-    }
-
-    private fun parseUdpReply(data: ByteArray, len: Int) {
-        // Camera-module reply FF 53 54 <op> ... ; op 0x15 carries the current gimbal angle.
-        if (len >= 6 &&
-            (data[0].toInt() and 0xff) == 0xFF &&
-            (data[1].toInt() and 0xff) == 0x53 &&
-            (data[2].toInt() and 0xff) == 0x54 &&
-            (data[3].toInt() and 0xff) == 0x15
-        ) {
-            gimbalAngle = (data[5].toInt() and 0xff).coerceIn(GIMBAL_MIN, GIMBAL_MAX)
         }
     }
 

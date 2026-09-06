@@ -7,9 +7,11 @@ The stock app (`com.vison.macrochip.gps.pro`) asks for around thirty permissions
 ## What it does
 
 - Live video from the drone camera, decoded in hardware and drawn at full frame rate.
+- Camera gimbal tilt, press and hold the on-screen arrows.
+- Photo capture to the drone's SD card.
+- A telemetry bar across the top: battery voltage, GPS satellites, altitude, distance, speed, and link strength.
+- Video recording to the SD card (the command is in; it needs the card's filesystem intact).
 - A monitor first: it fills the screen with the picture and stays out of the way.
-
-The screen has camera-tilt buttons wired up, but the gimbal command for this drone isn't found yet, so they do nothing on this unit for now.
 
 It deliberately does **not** control the aircraft. None of the flight commands (throttle, arm, takeoff, land) are implemented, and the one byte prefix that carries them is never sent. This is a camera monitor, not a controller.
 
@@ -22,7 +24,7 @@ The drone runs its own open WiFi access point and a small Linux stack (Allwinner
 3. The drone answers with a continuous byte stream: a 44-byte header per frame, then raw H.264 (Annex-B, with parameter sets in-band on every I-frame).
 4. The app strips the headers, feeds each frame to `MediaCodec`, and renders straight to a `SurfaceView`.
 
-Camera tilt is meant to be a one-line command on UDP port 8080 (`FF 53 54 20 01 <angle 0-90>`), but this unit ignores it, so the real gimbal command is still being tracked down.
+Camera tilt is a streamed rate command on UDP port 8080. This unit uses the VISON "camera-adjust" frame (`FF FD 09 02 01 <dir> …`), resent about every 20ms while a tilt button is held. Telemetry (battery, GPS, altitude, distance, speed) arrives unsolicited as `FF FE` frames on the command channel and is decoded in `VisonTelemetry`.
 
 The protocol was recovered by decompiling the vendor app and reading the drone's own firmware over its (root, no-password) telnet shell. Notes are under [`notes/`](../notes) in the working tree if you have them.
 
@@ -54,4 +56,4 @@ Written against one specific drone: a VISON-protocol unit whose AP reports trans
 
 ## Status
 
-Live video runs with no stalls. Still open: the gimbal command for this unit, longer link range, and lower latency.
+Working: live video with no stalls, gimbal tilt, photo capture, telemetry. Video recording needs a clean SD card filesystem. Still open: longer link range and lower latency.

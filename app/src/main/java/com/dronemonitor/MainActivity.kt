@@ -1,5 +1,6 @@
 package com.dronemonitor
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -8,10 +9,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -22,18 +23,20 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
     private lateinit var root: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
-    private lateinit var tilt: TextView
-    private lateinit var controls: LinearLayout
+    private lateinit var toast: TextView
+    private lateinit var recordButton: TextView
+    private lateinit var telemetryBar: TextView
 
     private var client: DroneClient? = null
     private var surfaceReady = false
     @Volatile private var streaming = false
+    private var recording = false
 
     private var videoW = 16
     private var videoH = 9
 
     private val ui = Handler(Looper.getMainLooper())
-    private val hideTilt = Runnable { tilt.animate().alpha(0f).setDuration(400).start() }
+    private val hideToast = Runnable { toast.animate().alpha(0f).setDuration(400).start() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,61 +59,151 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             setPadding(44, 28, 44, 28)
-            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            background = pill(Color.argb(150, 0, 0, 0))
             text = "Starting…"
         }
-        root.addView(
-            status,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER
-            )
-        )
+        root.addView(status, centered())
 
-        controls = buildControls()
-        root.addView(
-            controls,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.END or Gravity.CENTER_VERTICAL
-            )
-        )
-
-        tilt = TextView(this).apply {
+        telemetryBar = TextView(this).apply {
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+            background = pill(Color.argb(120, 0, 0, 0))
+            visibility = View.GONE
+        }
+        root.addView(
+            telemetryBar,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_HORIZONTAL or Gravity.TOP
+            ).apply { topMargin = dp(10) }
+        )
+
+        addGimbalControls()
+        addCaptureControls()
+
+        toast = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setPadding(36, 18, 36, 18)
-            background = pill(Color.argb(140, 0, 0, 0))
+            background = pill(Color.argb(150, 0, 0, 0))
             alpha = 0f
         }
         root.addView(
-            tilt,
+            toast,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.END or Gravity.BOTTOM
-            ).apply { rightMargin = 150; bottomMargin = 48 }
+                Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
+            ).apply { bottomMargin = dp(40) }
         )
 
         setContentView(root)
         surfaceView.holder.addCallback(this)
-        root.setOnClickListener { applyImmersive() }
     }
 
-    private fun buildControls(): LinearLayout {
+    private fun centered() = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        Gravity.CENTER
+    )
+
+    // ---- gimbal (right edge, press and hold) ------------------------------
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun addGimbalControls() {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
-        col.setPadding(0, 0, 24, 0)
-        col.addView(controlButton("▲") { nudge(-15) })   // tilt toward horizon
-        col.addView(controlButton("●") { center() })      // recenter (forward)
-        col.addView(controlButton("▼") { nudge(15) })     // tilt toward ground
-        return col
+        col.gravity = Gravity.CENTER_HORIZONTAL
+
+        val up = roundButton("▲")
+        val down = roundButton("▼")
+        up.setOnTouchListener { v, e -> handleTilt(v, e, true); true }
+        down.setOnTouchListener { v, e -> handleTilt(v, e, false); true }
+        col.addView(up)
+        col.addView(down, LinearLayout.LayoutParams(dp(56), dp(56)).apply { topMargin = dp(14) })
+
+        root.addView(
+            col,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.END or Gravity.CENTER_VERTICAL
+            ).apply { rightMargin = dp(18) }
+        )
     }
 
-    private fun controlButton(glyph: String, onTap: () -> Unit): TextView {
-        val size = dp(56)
+    private fun handleTilt(v: View, e: MotionEvent, up: Boolean) {
+        when (e.action) {
+            MotionEvent.ACTION_DOWN -> {
+                v.alpha = 1f
+                client?.gimbalPress(up)
+                showToast(if (up) "Tilting up" else "Tilting down")
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                v.alpha = 0.5f
+                client?.gimbalRelease()
+            }
+        }
+    }
+
+    // ---- capture (left edge) ----------------------------------------------
+
+    private fun addCaptureControls() {
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.gravity = Gravity.CENTER_HORIZONTAL
+
+        val photo = roundButton("○")
+        photo.setOnClickListener {
+            client?.takePhoto()
+            flash()
+            showToast("Photo → SD card")
+        }
+        recordButton = roundButton("●")
+        recordButton.setTextColor(Color.rgb(255, 80, 80))
+        recordButton.setOnClickListener { toggleRecord() }
+
+        col.addView(photo)
+        col.addView(recordButton, LinearLayout.LayoutParams(dp(56), dp(56)).apply { topMargin = dp(14) })
+
+        root.addView(
+            col,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.START or Gravity.CENTER_VERTICAL
+            ).apply { leftMargin = dp(18) }
+        )
+    }
+
+    private fun toggleRecord() {
+        val c = client ?: return
+        recording = !recording
+        if (recording) {
+            c.startRecord()
+            recordButton.text = "■"
+            recordButton.background = pill(Color.argb(180, 200, 40, 40))
+            showToast("Recording to SD card")
+        } else {
+            c.stopRecord()
+            recordButton.text = "●"
+            recordButton.background = pill(Color.argb(90, 20, 24, 30))
+            showToast("Recording stopped")
+        }
+    }
+
+    private fun flash() {
+        val f = View(this)
+        f.setBackgroundColor(Color.WHITE)
+        root.addView(f, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        f.animate().alpha(0f).setDuration(220).withEndAction { root.removeView(f) }.start()
+    }
+
+    // ---- shared UI helpers ------------------------------------------------
+
+    private fun roundButton(glyph: String): TextView {
         val tv = TextView(this)
         tv.text = glyph
         tv.setTextColor(Color.WHITE)
@@ -118,16 +211,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
         tv.background = pill(Color.argb(90, 20, 24, 30))
         tv.alpha = 0.5f
-        val lp = LinearLayout.LayoutParams(size, size)
-        lp.topMargin = dp(10)
-        lp.gravity = Gravity.CENTER_HORIZONTAL
-        tv.layoutParams = lp
-        tv.setOnClickListener {
-            tv.animate().alpha(1f).setDuration(80).withEndAction {
-                tv.animate().alpha(0.5f).setDuration(400).start()
-            }.start()
-            onTap()
-        }
+        tv.layoutParams = LinearLayout.LayoutParams(dp(56), dp(56))
         return tv
     }
 
@@ -139,23 +223,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
         return d
     }
 
-    private fun nudge(delta: Int) {
-        val c = client ?: return
-        val a = c.nudgeGimbal(delta)
-        showTilt(a)
-    }
-
-    private fun center() {
-        val c = client ?: return
-        c.setGimbalAngle(0)
-        showTilt(0)
-    }
-
-    private fun showTilt(angle: Int) {
-        tilt.text = "Tilt ${angle}°"
-        tilt.animate().alpha(1f).setDuration(120).start()
-        ui.removeCallbacks(hideTilt)
-        ui.postDelayed(hideTilt, 1600)
+    private fun showToast(text: String) {
+        toast.text = text
+        toast.animate().alpha(1f).setDuration(120).start()
+        ui.removeCallbacks(hideToast)
+        ui.postDelayed(hideToast, 1400)
     }
 
     private fun applyImmersive() {
@@ -229,7 +301,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
         stopClient()
     }
 
-    // DroneClient.Listener
     override fun onStatus(text: String) {
         runOnUiThread {
             if (streaming) return@runOnUiThread
@@ -255,6 +326,27 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
         }
     }
 
-    private fun dp(v: Int): Int =
-        (v * resources.displayMetrics.density).toInt()
+    override fun onTelemetry(t: VisonTelemetry.Telemetry) {
+        runOnUiThread {
+            if (!t.hasData && t.rssiDbm == 0) return@runOnUiThread
+            val sb = StringBuilder()
+            if (t.hasData) {
+                if (t.lowBattery) sb.append("LOW BATT   ")
+                sb.append(
+                    String.format(
+                        "BAT %.1fV   SAT %d   ALT %.1fm   DST %.0fm   SPD %.1fm/s",
+                        t.batteryVolts, t.satellites, t.heightM, t.distanceM, t.hSpeed
+                    )
+                )
+            }
+            if (t.rssiDbm != 0) {
+                if (sb.isNotEmpty()) sb.append("   ")
+                sb.append("LINK ${t.rssiDbm}dBm")
+            }
+            telemetryBar.text = sb.toString()
+            telemetryBar.visibility = View.VISIBLE
+        }
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 }
