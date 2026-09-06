@@ -287,7 +287,7 @@ class DroneClient(
                     Log.d(TAG, "thread $name exception: ${e.javaClass.simpleName} ${e.message}")
                     if (name == "video") logEvent("video error: ${e.javaClass.simpleName}")
                 }
-                if (running.get()) sleep(1200)
+                if (running.get()) sleep(400)
             }
         }, "drone-$name")
         t.isDaemon = true
@@ -330,7 +330,13 @@ class DroneClient(
                 val n = try {
                     inp.read(buffer)
                 } catch (te: SocketTimeoutException) {
-                    if (System.currentTimeMillis() - lastVideoByteMs > 12000) break
+                    // Reconnect fast: a >2s gap at any signal is a real stall, and the
+                    // stream does not resume on its own — a quick reconnect makes a brief
+                    // drone-side hiccup a ~2-3s blip instead of a long freeze.
+                    if (System.currentTimeMillis() - lastVideoByteMs > 2000) {
+                        logEvent("video stall >2s, reconnecting")
+                        break
+                    }
                     -2
                 }
                 if (n == -1) { Log.d(TAG, "video socket closed (read -1)"); break }
