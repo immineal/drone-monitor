@@ -106,14 +106,14 @@ class DroneClient(
 
     private val TAG = "DroneMon"
 
-    private var logWriter: java.io.Writer? = null
-    private val logFmt = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
+    private var logStream: java.io.FileOutputStream? = null
+    private val logFmt = java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US)
 
     private fun openLog() {
         try {
             val dir = context.getExternalFilesDir(null)
             val f = java.io.File(dir, "flight.log")
-            logWriter = java.io.BufferedWriter(java.io.FileWriter(f, true))
+            logStream = java.io.FileOutputStream(f, true)
             logEvent("---- session start ----")
         } catch (_: Exception) {
         }
@@ -124,14 +124,18 @@ class DroneClient(
     @Synchronized
     private fun writeLog(line: String) {
         try {
-            logWriter?.let { it.write(line); it.write("\n"); it.flush() }
+            logStream?.let {
+                it.write((line + "\n").toByteArray())
+                it.flush()
+                it.fd.sync() // force to flash so nothing is lost on a sudden power-off
+            }
         } catch (_: Exception) {
         }
     }
 
     private fun closeLog() {
-        try { logEvent("---- session stop ----"); logWriter?.close() } catch (_: Exception) {}
-        logWriter = null
+        try { logEvent("---- session stop ----"); logStream?.close() } catch (_: Exception) {}
+        logStream = null
     }
 
     private var gateway = "172.16.10.1"
@@ -150,7 +154,8 @@ class DroneClient(
         listener.onResolution(w, h)
     }
 
-    private val telemetry = VisonTelemetry { t -> listener.onTelemetry(t) }
+    @Volatile private var lastTelem: VisonTelemetry.Telemetry? = null
+    private val telemetry = VisonTelemetry { t -> lastTelem = t; listener.onTelemetry(t) }
 
     fun start() {
         if (running.getAndSet(true)) return
@@ -269,7 +274,11 @@ class DroneClient(
             val readKB = (b - lastBytes) / 1024
             val fps = r - lastRendered
             Log.d(TAG, "1s read=${b - lastBytes}B fed=${f - lastFed} rendered=$fps iframe=${k - lastKey} skipped=${s - lastSkip}")
-            writeLog("${logFmt.format(java.util.Date())}  rssi=${rssi}dBm  read=${readKB}KB/s  fps=$fps  iframe=${k - lastKey}" + if (readKB == 0L) "  <STALL>" else "")
+            val tl = lastTelem
+            val tstr = if (tl != null && tl.hasData) {
+                "  sat=${tl.satellites} alt=${"%.1f".format(tl.heightM)}m dist=${"%.0f".format(tl.distanceM)}m spd=${"%.1f".format(tl.hSpeed)} batt=${"%.1f".format(tl.batteryVolts)}V"
+            } else ""
+            writeLog("${logFmt.format(java.util.Date())}  rssi=${rssi}dBm  read=${readKB}KB/s  fps=$fps  iframe=${k - lastKey}$tstr" + if (readKB == 0L) "  <STALL>" else "")
             lastBytes = b; lastFed = f; lastRendered = r; lastKey = k; lastSkip = s
         }
     }
