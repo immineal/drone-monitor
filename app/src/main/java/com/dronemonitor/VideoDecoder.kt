@@ -104,6 +104,12 @@ class VideoDecoder(
 
     fun framesRendered(): Long = rendered
 
+    /** Tear down and recreate the codec for a clean start (e.g. on a camera switch). */
+    fun reset() {
+        release()
+        try { start() } catch (_: Exception) {}
+    }
+
     fun release() {
         started = false
         synchronized(lock) {

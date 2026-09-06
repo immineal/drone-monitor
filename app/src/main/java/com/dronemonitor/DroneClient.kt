@@ -58,6 +58,23 @@ class DroneClient(
     @Volatile private var gimbalActive = false
     @Volatile private var gimbalFrame: ByteArray = GIMBAL_STOP
 
+    @Volatile private var videoHb: ByteArray = HB_VIDEO_CAM0
+    @Volatile private var secondCamera = false
+    @Volatile private var switchPending = false
+
+    /** Switch between the main and second camera (twin-lens units). */
+    fun switchCamera(): Boolean {
+        secondCamera = !secondCamera
+        videoHb = if (secondCamera) HB_VIDEO_CAM1 else HB_VIDEO_CAM0
+        switchPending = true // the video loop resets the pipeline for the new camera's stream
+        return secondCamera
+    }
+
+    /** Flip/mirror the image (UDP 0x02 on, 0x01 off). */
+    fun setMirror(on: Boolean) {
+        sendUdpCommand(byteArrayOf(if (on) 0x02 else 0x01))
+    }
+
     /** Begin tilting; up=true tilts toward the horizon, up=false toward the ground. Hold to keep moving. */
     fun gimbalPress(up: Boolean) {
         gimbalFrame = if (up) GIMBAL_UP else GIMBAL_DOWN
@@ -89,6 +106,34 @@ class DroneClient(
 
     private val TAG = "DroneMon"
 
+    private var logWriter: java.io.Writer? = null
+    private val logFmt = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
+
+    private fun openLog() {
+        try {
+            val dir = context.getExternalFilesDir(null)
+            val f = java.io.File(dir, "flight.log")
+            logWriter = java.io.BufferedWriter(java.io.FileWriter(f, true))
+            logEvent("---- session start ----")
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun logEvent(msg: String) = writeLog("${logFmt.format(java.util.Date())}  $msg")
+
+    @Synchronized
+    private fun writeLog(line: String) {
+        try {
+            logWriter?.let { it.write(line); it.write("\n"); it.flush() }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun closeLog() {
+        try { logEvent("---- session stop ----"); logWriter?.close() } catch (_: Exception) {}
+        logWriter = null
+    }
+
     private var gateway = "172.16.10.1"
     private var localIpBytes = byteArrayOf(172.toByte(), 16, 10, 2)
 
@@ -109,6 +154,7 @@ class DroneClient(
 
     fun start() {
         if (running.getAndSet(true)) return
+        openLog()
         try { decoder.start() } catch (_: Exception) {}
         listener.onStatus("Looking for drone Wi-Fi…")
         val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -211,14 +257,19 @@ class DroneClient(
         var lastBytes = 0L; var lastFed = 0L; var lastRendered = 0L; var lastKey = 0L; var lastSkip = 0L
         while (running.get()) {
             sleep(1000)
+            var rssi = 0
             try {
                 val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                 @Suppress("DEPRECATION")
-                telemetry.setRssi(wifi.connectionInfo.rssi)
+                rssi = wifi.connectionInfo.rssi
+                telemetry.setRssi(rssi)
             } catch (_: Exception) {
             }
             val b = statBytes; val f = statFed; val r = decoder.framesRendered(); val k = statKey; val s = statSkipped
-            Log.d(TAG, "1s read=${b - lastBytes}B fed=${f - lastFed} rendered=${r - lastRendered} iframe=${k - lastKey} skipped=${s - lastSkip}")
+            val readKB = (b - lastBytes) / 1024
+            val fps = r - lastRendered
+            Log.d(TAG, "1s read=${b - lastBytes}B fed=${f - lastFed} rendered=$fps iframe=${k - lastKey} skipped=${s - lastSkip}")
+            writeLog("${logFmt.format(java.util.Date())}  rssi=${rssi}dBm  read=${readKB}KB/s  fps=$fps  iframe=${k - lastKey}" + if (readKB == 0L) "  <STALL>" else "")
             lastBytes = b; lastFed = f; lastRendered = r; lastKey = k; lastSkip = s
         }
     }
@@ -228,11 +279,13 @@ class DroneClient(
             while (running.get()) {
                 try {
                     Log.d(TAG, "thread $name (re)start")
+                    if (name == "video") logEvent("video (re)connect")
                     body()
                 } catch (_: InterruptedException) {
                     return@Thread
                 } catch (e: Exception) {
                     Log.d(TAG, "thread $name exception: ${e.javaClass.simpleName} ${e.message}")
+                    if (name == "video") logEvent("video error: ${e.javaClass.simpleName}")
                 }
                 if (running.get()) sleep(1200)
             }
@@ -250,7 +303,7 @@ class DroneClient(
             s.soTimeout = 1000
             val out = s.getOutputStream()
             videoOut = out
-            out.write(HB_VIDEO_CAM0); out.flush()
+            out.write(videoHb); out.flush()
             var lastHb = System.currentTimeMillis()
             requestIFrame()
             lastVideoByteMs = System.currentTimeMillis()
@@ -260,9 +313,18 @@ class DroneClient(
             val buffer = ByteArray(65536)
             listener.onStatus("Waiting for video…")
             while (running.get()) {
+                if (switchPending) {
+                    switchPending = false
+                    parser.reset()
+                    sawKeyFrame = false
+                    decoder.reset()
+                    try { out.write(videoHb); out.flush() } catch (_: Exception) {}
+                    lastHb = System.currentTimeMillis()
+                    requestIFrame()
+                }
                 // The drone keeps streaming only while it receives this heartbeat ~every second.
                 if (System.currentTimeMillis() - lastHb >= 1000) {
-                    try { out.write(HB_VIDEO_CAM0); out.flush() } catch (e: Exception) { break }
+                    try { out.write(videoHb); out.flush() } catch (e: Exception) { break }
                     lastHb = System.currentTimeMillis()
                 }
                 val n = try {
@@ -432,6 +494,7 @@ class DroneClient(
         }
         netCallback = null
         boundNetwork = null
+        closeLog()
     }
 
     private fun sleep(ms: Long) {

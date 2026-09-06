@@ -10,8 +10,11 @@ The stock app (`com.vison.macrochip.gps.pro`) asks for around thirty permissions
 - Camera gimbal tilt, press and hold the on-screen arrows.
 - Photo capture to the drone's SD card.
 - A telemetry bar across the top: battery voltage, GPS satellites, altitude, distance, speed, and link strength.
-- Video recording to the SD card (the command is in; it needs the card's filesystem intact).
+- A settings panel: switch camera lens, mirror the image, and read the drone's resolution and code.
+- A flight log written to the phone every second (RSSI, throughput, framerate, stalls) so a bad flight can be diagnosed afterwards.
 - A monitor first: it fills the screen with the picture and stays out of the way.
+
+Video recording to the SD card is coded but this model doesn't act on the command yet, so it's off in practice.
 
 It deliberately does **not** control the aircraft. None of the flight commands (throttle, arm, takeoff, land) are implemented, and the one byte prefix that carries them is never sent. This is a camera monitor, not a controller.
 
@@ -56,4 +59,4 @@ Written against one specific drone: a VISON-protocol unit whose AP reports trans
 
 ## Status
 
-Working: live video with no stalls, gimbal tilt, photo capture, telemetry. Video recording needs a clean SD card filesystem. Still open: longer link range and lower latency.
+Working: live video with no stalls, gimbal tilt, photo capture, telemetry, camera switch, and the flight log. On this drone, 5GHz reaches much further than 2.4GHz (its 2.4GHz radio is ~18dB weaker), so the drone is best left on 5GHz. The stream is a fixed 1280x720; the drone's firmware hardcodes it, so there's no way to lower the bitrate for a weaker link short of patching the on-board binary. Still open: video recording on this model, and lower latency.

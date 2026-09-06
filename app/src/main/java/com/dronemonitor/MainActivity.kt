@@ -26,11 +26,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
     private lateinit var toast: TextView
     private lateinit var recordButton: TextView
     private lateinit var telemetryBar: TextView
+    private lateinit var settingsPanel: LinearLayout
+    private lateinit var settingsInfo: TextView
+    private lateinit var cameraRow: TextView
 
     private var client: DroneClient? = null
     private var surfaceReady = false
     @Volatile private var streaming = false
     private var recording = false
+    private var mirrorOn = false
+    private var resText = ""
+    private var lastTelemetry: VisonTelemetry.Telemetry? = null
 
     private var videoW = 16
     private var videoH = 9
@@ -82,6 +88,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
 
         addGimbalControls()
         addCaptureControls()
+        addSettings()
 
         toast = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -192,6 +199,88 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
             recordButton.background = pill(Color.argb(90, 20, 24, 30))
             showToast("Recording stopped")
         }
+    }
+
+    // ---- settings panel (gear, top-right) ---------------------------------
+
+    private fun addSettings() {
+        val gear = roundButton("⚙")
+        root.addView(
+            gear,
+            FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.TOP)
+                .apply { rightMargin = dp(18); topMargin = dp(14) }
+        )
+        gear.setOnClickListener { toggleSettings() }
+
+        settingsPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(18), dp(22), dp(18))
+            background = pill(Color.argb(230, 16, 20, 26))
+            visibility = View.GONE
+        }
+        settingsPanel.addView(TextView(this).apply {
+            text = "Settings"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setPadding(dp(4), 0, 0, dp(10))
+        })
+        cameraRow = settingRow("Camera: main lens") {
+            val second = client?.switchCamera() ?: false
+            cameraRow.text = "Camera: " + if (second) "second lens" else "main lens"
+            showToast("Switched to " + if (second) "second lens" else "main lens")
+        }
+        settingsPanel.addView(cameraRow)
+        settingsPanel.addView(settingRow("Image: normal") {
+            mirrorOn = !mirrorOn
+            client?.setMirror(mirrorOn)
+            (it as TextView).text = "Image: " + if (mirrorOn) "mirrored" else "normal"
+        })
+        settingsInfo = TextView(this).apply {
+            setTextColor(Color.argb(210, 255, 255, 255))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(dp(4), dp(12), dp(4), dp(6))
+        }
+        settingsPanel.addView(settingsInfo)
+        settingsPanel.addView(settingRow("Close") { toggleSettings() })
+
+        root.addView(
+            settingsPanel,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.END or Gravity.TOP
+            ).apply { rightMargin = dp(18); topMargin = dp(80) }
+        )
+    }
+
+    private fun settingRow(label: String, onClick: (View) -> Unit): TextView {
+        val tv = TextView(this)
+        tv.text = label
+        tv.setTextColor(Color.WHITE)
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        tv.setPadding(dp(14), dp(12), dp(14), dp(12))
+        tv.background = pill(Color.argb(60, 255, 255, 255))
+        tv.layoutParams = LinearLayout.LayoutParams(dp(230), LinearLayout.LayoutParams.WRAP_CONTENT)
+            .apply { topMargin = dp(8) }
+        tv.setOnClickListener { onClick(tv) }
+        return tv
+    }
+
+    private fun toggleSettings() {
+        val show = settingsPanel.visibility != View.VISIBLE
+        settingsPanel.visibility = if (show) View.VISIBLE else View.GONE
+        if (show) updateSettingsInfo()
+    }
+
+    private fun updateSettingsInfo() {
+        val sb = StringBuilder()
+        if (resText.isNotEmpty()) sb.append("Resolution: ").append(resText).append('\n')
+        lastTelemetry?.let { t ->
+            if (t.visonCode >= 0) sb.append("Drone code: ").append(t.visonCode).append('\n')
+            if (t.hasData) sb.append(String.format("Battery: %.1f V\n", t.batteryVolts))
+            if (t.rssiDbm != 0) sb.append("Link: ").append(t.rssiDbm).append(" dBm")
+        }
+        settingsInfo.text = sb.toString().trim()
     }
 
     private fun flash() {
@@ -321,6 +410,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
             if (width > 0 && height > 0) {
                 videoW = width
                 videoH = height
+                resText = "${width}×${height}"
                 resizeSurface()
             }
         }
@@ -328,6 +418,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
 
     override fun onTelemetry(t: VisonTelemetry.Telemetry) {
         runOnUiThread {
+            lastTelemetry = t
+            if (settingsPanel.visibility == View.VISIBLE) updateSettingsInfo()
             if (!t.hasData && t.rssiDbm == 0) return@runOnUiThread
             val sb = StringBuilder()
             if (t.hasData) {
