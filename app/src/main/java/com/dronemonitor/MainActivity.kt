@@ -26,6 +26,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
     private lateinit var toast: TextView
     private lateinit var recordButton: TextView
     private lateinit var telemetryBar: TextView
+    private lateinit var batteryView: TextView
+    private var batteryPulse: android.animation.ObjectAnimator? = null
     private lateinit var settingsPanel: LinearLayout
     private lateinit var settingsInfo: TextView
     private lateinit var cameraRow: TextView
@@ -84,6 +86,23 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER_HORIZONTAL or Gravity.TOP
             ).apply { topMargin = dp(10) }
+        )
+
+        batteryView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(18), dp(9), dp(18), dp(9))
+            background = pill(Color.argb(150, 0, 0, 0))
+            visibility = View.GONE
+        }
+        root.addView(
+            batteryView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.START or Gravity.TOP
+            ).apply { leftMargin = dp(18); topMargin = dp(12) }
         )
 
         addGimbalControls()
@@ -420,14 +439,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
         runOnUiThread {
             lastTelemetry = t
             if (settingsPanel.visibility == View.VISIBLE) updateSettingsInfo()
+            if (t.hasData) updateBattery(t.batteryVolts, t.lowBattery)
             if (!t.hasData && t.rssiDbm == 0) return@runOnUiThread
             val sb = StringBuilder()
             if (t.hasData) {
-                if (t.lowBattery) sb.append("LOW BATT   ")
                 sb.append(
                     String.format(
-                        "BAT %.1fV   SAT %d   ALT %.1fm   DST %.0fm   SPD %.1fm/s",
-                        t.batteryVolts, t.satellites, t.heightM, t.distanceM, t.hSpeed
+                        "SAT %d   ALT %.1fm   DST %.0fm   SPD %.1fm/s",
+                        t.satellites, t.heightM, t.distanceM, t.hSpeed
                     )
                 )
             }
@@ -438,6 +457,39 @@ class MainActivity : Activity(), SurfaceHolder.Callback, DroneClient.Listener {
             telemetryBar.text = sb.toString()
             telemetryBar.visibility = View.VISIBLE
         }
+    }
+
+    // 2S LiPo (full 8.4V): green ok, amber = head back, red = land now, pulsing when critical.
+    private fun updateBattery(v: Float, lowFlag: Boolean) {
+        if (v <= 0f) { batteryView.visibility = View.GONE; stopBatteryPulse(); return }
+        batteryView.visibility = View.VISIBLE
+        val bg: Int; val label: String; val critical: Boolean
+        when {
+            lowFlag || v < 6.6f -> { bg = Color.rgb(200, 20, 20); label = "CRITICAL — LAND"; critical = true }
+            v < 7.0f -> { bg = Color.rgb(200, 45, 45); label = "LAND NOW"; critical = true }
+            v < 7.2f -> { bg = Color.rgb(205, 110, 20); label = "LAND SOON"; critical = false }
+            v < 7.4f -> { bg = Color.rgb(198, 165, 20); label = "HEAD BACK"; critical = false }
+            else -> { bg = Color.rgb(30, 135, 60); label = ""; critical = false }
+        }
+        batteryView.text = if (label.isEmpty()) String.format("%.1f V", v) else String.format("%.1f V  ·  %s", v, label)
+        batteryView.background = pill(Color.argb(235, Color.red(bg), Color.green(bg), Color.blue(bg)))
+        if (critical) startBatteryPulse() else stopBatteryPulse()
+    }
+
+    private fun startBatteryPulse() {
+        if (batteryPulse?.isStarted == true) return
+        batteryPulse = android.animation.ObjectAnimator.ofFloat(batteryView, "alpha", 1f, 0.35f).apply {
+            duration = 450
+            repeatCount = android.animation.ValueAnimator.INFINITE
+            repeatMode = android.animation.ValueAnimator.REVERSE
+            start()
+        }
+    }
+
+    private fun stopBatteryPulse() {
+        batteryPulse?.cancel()
+        batteryPulse = null
+        batteryView.alpha = 1f
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
